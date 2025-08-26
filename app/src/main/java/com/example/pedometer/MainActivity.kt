@@ -19,11 +19,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private lateinit var sensorManager: SensorManager
-    private var stepCounterSensor: Sensor? = null
+    private var accelerometer: Sensor? = null
 
     // --- UI Elements ---
     private lateinit var tvSpeed: TextView
@@ -38,10 +39,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private val KEY_HEIGHT = "userHeight"
     private val KEY_SPEED_LIMIT = "speedLimit"
 
-    // --- 计步和速度计算相关变量 ---
-    private var initialStepCount = -1
-    private var sessionStepCount = 0
-    private var startTime: Long = 0
+    // --- 速度计算相关变量 ---
     private var userStrideLengthMeters = 0.762f // 默认值
     private var speedLimit = 0f // 速度上限，0表示不限制
     private var currentDisplayedSpeed = 0f // 当前UI显示的速度，用于动画
@@ -50,71 +48,75 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private val stopHandler = Handler(Looper.getMainLooper())
     private lateinit var stopRunnable: Runnable
 
+    // --- 加速度计步算法相关变量 ---
+    private var lastStepTimeNs: Long = 0
+    private val stepThreshold = 1.8f // 步数检测阈值，可能需要微调
+    private var highPassFilter = floatArrayOf(0f, 0f, 0f)
+    private var lastMagnitude: Float = 0f
+    private var peakDetected = false
+
     private val ACTIVITY_RECOGNITION_REQUEST_CODE = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // 初始化 SharedPreferences
         sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 初始化 UI
+        // 初始化UI
         tvSpeed = findViewById(R.id.tv_speed)
         etHeight = findViewById(R.id.et_height)
         btnSaveHeight = findViewById(R.id.btn_save_height)
         etSpeedLimit = findViewById(R.id.et_speed_limit)
         btnSaveSpeedLimit = findViewById(R.id.btn_save_speed_limit)
 
-        // 加载已保存的设置
         loadHeightAndUpdateStrideLength()
         loadSpeedLimit()
 
-        // 初始化停止检测的Runnable
         stopRunnable = Runnable { animateSpeedUpdate(0f) }
 
-        // 设置身高保存按钮的点击事件
-        btnSaveHeight.setOnClickListener {
-            val heightStr = etHeight.text.toString()
-            if (heightStr.isNotEmpty()) {
-                try {
-                    val heightCm = heightStr.toFloat()
-                    saveHeight(heightCm)
-                    updateStrideLength(heightCm)
-                    Toast.makeText(this, "身高已保存: ${heightCm}cm", Toast.LENGTH_SHORT).show()
-                } catch (e: NumberFormatException) {
-                    Toast.makeText(this, "请输入有效的身高数字", Toast.LENGTH_SHORT).show()
-                }
-            } else {
-                Toast.makeText(this, "身高不能为空", Toast.LENGTH_SHORT).show()
-            }
-        }
+        btnSaveHeight.setOnClickListener { setupSaveHeightButton() }
+        btnSaveSpeedLimit.setOnClickListener { setupSaveSpeedLimitButton() }
 
-        // 设置速度上限保存按钮的点击事件
-        btnSaveSpeedLimit.setOnClickListener {
-            val limitStr = etSpeedLimit.text.toString()
-            if (limitStr.isNotEmpty()) {
-                try {
-                    val limit = limitStr.toFloat()
-                    saveSpeedLimit(limit)
-                    Toast.makeText(this, "速度上限已保存: ${limit}m/s", Toast.LENGTH_SHORT).show()
-                } catch (e: NumberFormatException) {
-                    Toast.makeText(this, "请输入有效的速度数字", Toast.LENGTH_SHORT).show()
-                }
-            } else {
-                Toast.makeText(this, "速度上限不能为空", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        // 检查权限
         checkActivityRecognitionPermission()
 
         // 初始化传感器
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        stepCounterSensor = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-        if (stepCounterSensor == null) {
-            Toast.makeText(this, "此设备不支持计步器传感器", Toast.LENGTH_SHORT).show()
+        if (accelerometer == null) {
+            Toast.makeText(this, "此设备不支持加速度传感器", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun setupSaveHeightButton() {
+        val heightStr = etHeight.text.toString()
+        if (heightStr.isNotEmpty()) {
+            try {
+                val heightCm = heightStr.toFloat()
+                saveHeight(heightCm)
+                updateStrideLength(heightCm)
+                Toast.makeText(this, "身高已保存: ${heightCm}cm", Toast.LENGTH_SHORT).show()
+            } catch (e: NumberFormatException) {
+                Toast.makeText(this, "请输入有效的身高数字", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "身高不能为空", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun setupSaveSpeedLimitButton() {
+        val limitStr = etSpeedLimit.text.toString()
+        if (limitStr.isNotEmpty()) {
+            try {
+                val limit = limitStr.toFloat()
+                saveSpeedLimit(limit)
+                Toast.makeText(this, "速度上限已保存: ${limit}m/s", Toast.LENGTH_SHORT).show()
+            } catch (e: NumberFormatException) {
+                Toast.makeText(this, "请输入有效的速度数字", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "速度上限不能为空", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -134,7 +136,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun updateStrideLength(heightCm: Float) {
-        // 使用公式：步长 ≈ 身高 * 0.45
         userStrideLengthMeters = (heightCm / 100) * 0.45f
     }
 
@@ -164,62 +165,73 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onResume() {
         super.onResume()
-        stepCounterSensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        accelerometer?.let {
+            // 使用游戏延迟以获得更快的更新
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
     }
 
     override fun onPause() {
         super.onPause()
         sensorManager.unregisterListener(this)
-        // 移除回调，防止应用在后台时执行
         stopHandler.removeCallbacks(stopRunnable)
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
         event?.let {
-            if (it.sensor.type == Sensor.TYPE_STEP_COUNTER) {
-                // 每次检测到步数，都先移除旧的“停止”回调
-                stopHandler.removeCallbacks(stopRunnable)
+            if (it.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                // 1. 移除重力影响：使用一个简单的高通滤波器
+                val alpha = 0.8f
+                highPassFilter[0] = alpha * highPassFilter[0] + (1 - alpha) * it.values[0]
+                highPassFilter[1] = alpha * highPassFilter[1] + (1 - alpha) * it.values[1]
+                highPassFilter[2] = alpha * highPassFilter[2] + (1 - alpha) * it.values[2]
 
-                val totalSteps = it.values[0].toInt()
+                val linearAcceleration = floatArrayOf(
+                    it.values[0] - highPassFilter[0],
+                    it.values[1] - highPassFilter[1],
+                    it.values[2] - highPassFilter[2]
+                )
 
-                if (initialStepCount == -1) {
-                    initialStepCount = totalSteps
-                    startTime = System.currentTimeMillis()
+                // 2. 计算加速度向量的模（大小）
+                val magnitude = sqrt(linearAcceleration[0] * linearAcceleration[0] + linearAcceleration[1] * linearAcceleration[1] + linearAcceleration[2] * linearAcceleration[2])
+
+                // 3. 简单的峰值检测算法来识别步伐
+                if (magnitude > stepThreshold && !peakDetected) {
+                    peakDetected = true
                 }
+                if (magnitude < lastMagnitude && peakDetected) {
+                    peakDetected = false
+                    // 检测到一步！
+                    val currentTimeNs = it.timestamp
+                    if (lastStepTimeNs != 0L) {
+                        val timeDeltaNs = currentTimeNs - lastStepTimeNs
+                        val timeDeltaS = timeDeltaNs / 1_000_000_000.0f
 
-                sessionStepCount = totalSteps - initialStepCount
-                calculateSpeed()
+                        // 避免因时间差过小导致速度异常大
+                        if (timeDeltaS > 0.2) {
+                            val speed = userStrideLengthMeters / timeDeltaS
 
-                // 设置一个新的3秒倒计时，如果3秒后没有新步数，则认为已停止
-                stopHandler.postDelayed(stopRunnable, 3000L)
+                            // 速度告警检查
+                            if (speedLimit > 0 && speed > speedLimit) {
+                                Toast.makeText(this, "警告: 速度已超过上限 ${speedLimit}m/s", Toast.LENGTH_SHORT).show()
+                            }
+
+                            // 更新UI并重置停止计时器
+                            animateSpeedUpdate(speed)
+                            stopHandler.removeCallbacks(stopRunnable)
+                            stopHandler.postDelayed(stopRunnable, 2000L) // 2秒无新步数则认为停止
+                        }
+                    }
+                    lastStepTimeNs = currentTimeNs
+                }
+                lastMagnitude = magnitude
             }
-        }
-    }
-
-    private fun calculateSpeed() {
-        if (sessionStepCount <= 0) return
-
-        val elapsedTime = (System.currentTimeMillis() - startTime) / 1000.0
-
-        if (elapsedTime > 1) { // 至少经过1秒才计算，避免初始速度过大
-            val distance = sessionStepCount * userStrideLengthMeters
-            val newSpeed = (distance / elapsedTime).toFloat()
-
-            // 速度告警检查
-            if (speedLimit > 0 && newSpeed > speedLimit) {
-                Toast.makeText(this, "警告: 速度已超过上限 ${speedLimit}m/s", Toast.LENGTH_SHORT).show()
-            }
-
-            // 使用动画平滑更新速度显示
-            animateSpeedUpdate(newSpeed)
         }
     }
 
     private fun animateSpeedUpdate(newSpeed: Float) {
         val animator = ValueAnimator.ofFloat(currentDisplayedSpeed, newSpeed)
-        animator.duration = 1500 // 动画持续时间，1.5秒
+        animator.duration = 500 // 动画持续时间缩短为0.5秒，以获得更灵敏的反馈
         animator.addUpdateListener {
             val animatedValue = it.animatedValue as Float
             currentDisplayedSpeed = animatedValue
