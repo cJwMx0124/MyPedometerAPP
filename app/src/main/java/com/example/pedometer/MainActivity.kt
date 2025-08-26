@@ -59,6 +59,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var smoothedSpeed = 0f
     private val SMOOTHING_ALPHA = 0.15f // 平滑因子，越小越平滑但响应越慢
 
+    // --- 告警状态变量 ---
+    private var lastAlertTimeMs: Long = 0
+    private val ALERT_INTERVAL_MS = 5000 // 告警最小间隔，5秒
+
     private val ACTIVITY_RECOGNITION_REQUEST_CODE = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -152,6 +156,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun saveSpeedLimit(limit: Float) {
         speedLimit = limit
+        lastAlertTimeMs = 0 // 重置告警计时器
         with(sharedPreferences.edit()) {
             putFloat(KEY_SPEED_LIMIT, limit)
             apply()
@@ -208,13 +213,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
                         if (timeDeltaS > 0.2) {
                             val instantaneousSpeed = userStrideLengthMeters / timeDeltaS
-
-                            if (speedLimit > 0 && instantaneousSpeed > speedLimit) {
-                                Toast.makeText(this, "警告: 速度已超过上限 ${speedLimit}m/s", Toast.LENGTH_SHORT).show()
-                            }
-
-                            // 应用EMA滤波器
                             smoothedSpeed = (instantaneousSpeed * SMOOTHING_ALPHA) + (smoothedSpeed * (1 - SMOOTHING_ALPHA))
+
+                            // 周期性告警逻辑
+                            if (speedLimit > 0) {
+                                if (smoothedSpeed > speedLimit) {
+                                    val currentTimeMs = System.currentTimeMillis()
+                                    if (currentTimeMs - lastAlertTimeMs > ALERT_INTERVAL_MS) {
+                                        Toast.makeText(this, "警告: 速度已超过上限 ${speedLimit}m/s", Toast.LENGTH_SHORT).show()
+                                        lastAlertTimeMs = currentTimeMs
+                                    }
+                                } else {
+                                    lastAlertTimeMs = 0 // 速度低于上限时，重置计时器
+                                }
+                            }
 
                             animateSpeedUpdate(smoothedSpeed)
                             stopHandler.removeCallbacks(stopRunnable)
@@ -229,9 +241,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun animateSpeedUpdate(newSpeed: Float) {
-        // 当速度归零时，重置平滑速度，以便下次启动时从0开始
         if (newSpeed == 0f) {
             smoothedSpeed = 0f
+            lastAlertTimeMs = 0 // 停止时重置告警计时器
         }
 
         val animator = ValueAnimator.ofFloat(currentDisplayedSpeed, newSpeed)
