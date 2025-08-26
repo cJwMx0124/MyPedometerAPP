@@ -1,5 +1,6 @@
 package com.example.pedometer
 
+import android.animation.ValueAnimator
 import android.Manifest
 import android.content.Context
 import android.content.SharedPreferences
@@ -23,22 +24,25 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var stepCounterSensor: Sensor? = null
 
     // --- UI Elements ---
-    private lateinit var tvStepCount: TextView
     private lateinit var tvSpeed: TextView
     private lateinit var etHeight: EditText
     private lateinit var btnSaveHeight: Button
+    private lateinit var etSpeedLimit: EditText
+    private lateinit var btnSaveSpeedLimit: Button
 
-    // --- SharedPreferences for storing height ---
+    // --- SharedPreferences for storing settings ---
     private lateinit var sharedPreferences: SharedPreferences
     private val PREFS_NAME = "PedometerPrefs"
     private val KEY_HEIGHT = "userHeight"
+    private val KEY_SPEED_LIMIT = "speedLimit"
 
     // --- 计步和速度计算相关变量 ---
     private var initialStepCount = -1
     private var sessionStepCount = 0
     private var startTime: Long = 0
-    // 用户步长（单位：米），现在是动态计算的
     private var userStrideLengthMeters = 0.762f // 默认值
+    private var speedLimit = 0f // 速度上限，0表示不限制
+    private var currentDisplayedSpeed = 0f // 当前UI显示的速度，用于动画
 
     private val ACTIVITY_RECOGNITION_REQUEST_CODE = 100
 
@@ -50,15 +54,17 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         sharedPreferences = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         // 初始化 UI
-        tvStepCount = findViewById(R.id.tv_step_count)
         tvSpeed = findViewById(R.id.tv_speed)
         etHeight = findViewById(R.id.et_height)
         btnSaveHeight = findViewById(R.id.btn_save_height)
+        etSpeedLimit = findViewById(R.id.et_speed_limit)
+        btnSaveSpeedLimit = findViewById(R.id.btn_save_speed_limit)
 
-        // 加载保存的身高并更新步长
+        // 加载已保存的设置
         loadHeightAndUpdateStrideLength()
+        loadSpeedLimit()
 
-        // 设置保存按钮的点击事件
+        // 设置身高保存按钮的点击事件
         btnSaveHeight.setOnClickListener {
             val heightStr = etHeight.text.toString()
             if (heightStr.isNotEmpty()) {
@@ -68,10 +74,26 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     updateStrideLength(heightCm)
                     Toast.makeText(this, "身高已保存: ${heightCm}cm", Toast.LENGTH_SHORT).show()
                 } catch (e: NumberFormatException) {
-                    Toast.makeText(this, "请输入有效的数字", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "请输入有效的身高数字", Toast.LENGTH_SHORT).show()
                 }
             } else {
                 Toast.makeText(this, "身高不能为空", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // 设置速度上限保存按钮的点击事件
+        btnSaveSpeedLimit.setOnClickListener {
+            val limitStr = etSpeedLimit.text.toString()
+            if (limitStr.isNotEmpty()) {
+                try {
+                    val limit = limitStr.toFloat()
+                    saveSpeedLimit(limit)
+                    Toast.makeText(this, "速度上限已保存: ${limit}m/s", Toast.LENGTH_SHORT).show()
+                } catch (e: NumberFormatException) {
+                    Toast.makeText(this, "请输入有效的速度数字", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(this, "速度上限不能为空", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -104,8 +126,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun updateStrideLength(heightCm: Float) {
         // 使用公式：步长 ≈ 身高 * 0.45
-        // 将身高从cm转换为米
         userStrideLengthMeters = (heightCm / 100) * 0.45f
+    }
+
+    private fun loadSpeedLimit() {
+        speedLimit = sharedPreferences.getFloat(KEY_SPEED_LIMIT, 0f)
+        if (speedLimit > 0) {
+            etSpeedLimit.setText(speedLimit.toString())
+        }
+    }
+
+    private fun saveSpeedLimit(limit: Float) {
+        speedLimit = limit
+        with(sharedPreferences.edit()) {
+            putFloat(KEY_SPEED_LIMIT, limit)
+            apply()
+        }
     }
 
     private fun checkActivityRecognitionPermission() {
@@ -140,8 +176,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 }
 
                 sessionStepCount = totalSteps - initialStepCount
-                tvStepCount.text = sessionStepCount.toString()
-
                 calculateSpeed()
             }
         }
@@ -152,11 +186,29 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         val elapsedTime = (System.currentTimeMillis() - startTime) / 1000.0
 
-        if (elapsedTime > 0) {
+        if (elapsedTime > 1) { // 至少经过1秒才计算，避免初始速度过大
             val distance = sessionStepCount * userStrideLengthMeters
-            val speed = distance / elapsedTime
-            tvSpeed.text = String.format("%.2f", speed)
+            val newSpeed = (distance / elapsedTime).toFloat()
+
+            // 速度告警检查
+            if (speedLimit > 0 && newSpeed > speedLimit) {
+                Toast.makeText(this, "警告: 速度已超过上限 ${speedLimit}m/s", Toast.LENGTH_SHORT).show()
+            }
+
+            // 使用动画平滑更新速度显示
+            animateSpeedUpdate(newSpeed)
         }
+    }
+
+    private fun animateSpeedUpdate(newSpeed: Float) {
+        val animator = ValueAnimator.ofFloat(currentDisplayedSpeed, newSpeed)
+        animator.duration = 1500 // 动画持续时间，1.5秒
+        animator.addUpdateListener {
+            val animatedValue = it.animatedValue as Float
+            currentDisplayedSpeed = animatedValue
+            tvSpeed.text = String.format("%.2f", animatedValue)
+        }
+        animator.start()
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
