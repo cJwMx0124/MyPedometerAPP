@@ -50,10 +50,14 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     // --- 加速度计步算法相关变量 ---
     private var lastStepTimeNs: Long = 0
-    private val stepThreshold = 1.8f // 步数检测阈值，可能需要微调
+    private val stepThreshold = 2.2f // 步数检测阈值，您已设为2.2f
     private var highPassFilter = floatArrayOf(0f, 0f, 0f)
     private var lastMagnitude: Float = 0f
     private var peakDetected = false
+
+    // --- EMA 平滑滤波器相关变量 ---
+    private var smoothedSpeed = 0f
+    private val SMOOTHING_ALPHA = 0.15f // 平滑因子，越小越平滑但响应越慢
 
     private val ACTIVITY_RECOGNITION_REQUEST_CODE = 100
 
@@ -166,7 +170,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onResume() {
         super.onResume()
         accelerometer?.let {
-            // 使用游戏延迟以获得更快的更新
             sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
     }
@@ -180,7 +183,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onSensorChanged(event: SensorEvent?) {
         event?.let {
             if (it.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-                // 1. 移除重力影响：使用一个简单的高通滤波器
                 val alpha = 0.8f
                 highPassFilter[0] = alpha * highPassFilter[0] + (1 - alpha) * it.values[0]
                 highPassFilter[1] = alpha * highPassFilter[1] + (1 - alpha) * it.values[1]
@@ -192,34 +194,31 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     it.values[2] - highPassFilter[2]
                 )
 
-                // 2. 计算加速度向量的模（大小）
                 val magnitude = sqrt(linearAcceleration[0] * linearAcceleration[0] + linearAcceleration[1] * linearAcceleration[1] + linearAcceleration[2] * linearAcceleration[2])
 
-                // 3. 简单的峰值检测算法来识别步伐
                 if (magnitude > stepThreshold && !peakDetected) {
                     peakDetected = true
                 }
                 if (magnitude < lastMagnitude && peakDetected) {
                     peakDetected = false
-                    // 检测到一步！
                     val currentTimeNs = it.timestamp
                     if (lastStepTimeNs != 0L) {
                         val timeDeltaNs = currentTimeNs - lastStepTimeNs
                         val timeDeltaS = timeDeltaNs / 1_000_000_000.0f
 
-                        // 避免因时间差过小导致速度异常大
                         if (timeDeltaS > 0.2) {
-                            val speed = userStrideLengthMeters / timeDeltaS
+                            val instantaneousSpeed = userStrideLengthMeters / timeDeltaS
 
-                            // 速度告警检查
-                            if (speedLimit > 0 && speed > speedLimit) {
+                            if (speedLimit > 0 && instantaneousSpeed > speedLimit) {
                                 Toast.makeText(this, "警告: 速度已超过上限 ${speedLimit}m/s", Toast.LENGTH_SHORT).show()
                             }
 
-                            // 更新UI并重置停止计时器
-                            animateSpeedUpdate(speed)
+                            // 应用EMA滤波器
+                            smoothedSpeed = (instantaneousSpeed * SMOOTHING_ALPHA) + (smoothedSpeed * (1 - SMOOTHING_ALPHA))
+
+                            animateSpeedUpdate(smoothedSpeed)
                             stopHandler.removeCallbacks(stopRunnable)
-                            stopHandler.postDelayed(stopRunnable, 2000L) // 2秒无新步数则认为停止
+                            stopHandler.postDelayed(stopRunnable, 2000L)
                         }
                     }
                     lastStepTimeNs = currentTimeNs
@@ -230,8 +229,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun animateSpeedUpdate(newSpeed: Float) {
+        // 当速度归零时，重置平滑速度，以便下次启动时从0开始
+        if (newSpeed == 0f) {
+            smoothedSpeed = 0f
+        }
+
         val animator = ValueAnimator.ofFloat(currentDisplayedSpeed, newSpeed)
-        animator.duration = 500 // 动画持续时间缩短为0.5秒，以获得更灵敏的反馈
+        animator.duration = 500
         animator.addUpdateListener {
             val animatedValue = it.animatedValue as Float
             currentDisplayedSpeed = animatedValue
