@@ -11,6 +11,8 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -44,6 +46,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var speedLimit = 0f // 速度上限，0表示不限制
     private var currentDisplayedSpeed = 0f // 当前UI显示的速度，用于动画
 
+    // --- 停止检测计时器 ---
+    private val stopHandler = Handler(Looper.getMainLooper())
+    private lateinit var stopRunnable: Runnable
+
     private val ACTIVITY_RECOGNITION_REQUEST_CODE = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,6 +69,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         // 加载已保存的设置
         loadHeightAndUpdateStrideLength()
         loadSpeedLimit()
+
+        // 初始化停止检测的Runnable
+        stopRunnable = Runnable { animateSpeedUpdate(0f) }
 
         // 设置身高保存按钮的点击事件
         btnSaveHeight.setOnClickListener {
@@ -163,11 +172,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onPause() {
         super.onPause()
         sensorManager.unregisterListener(this)
+        // 移除回调，防止应用在后台时执行
+        stopHandler.removeCallbacks(stopRunnable)
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
         event?.let {
             if (it.sensor.type == Sensor.TYPE_STEP_COUNTER) {
+                // 每次检测到步数，都先移除旧的“停止”回调
+                stopHandler.removeCallbacks(stopRunnable)
+
                 val totalSteps = it.values[0].toInt()
 
                 if (initialStepCount == -1) {
@@ -177,6 +191,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
                 sessionStepCount = totalSteps - initialStepCount
                 calculateSpeed()
+
+                // 设置一个新的3秒倒计时，如果3秒后没有新步数，则认为已停止
+                stopHandler.postDelayed(stopRunnable, 3000L)
             }
         }
     }
